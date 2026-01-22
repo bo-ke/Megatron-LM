@@ -8,6 +8,7 @@ from megatron.core.models.backends import BackendSpecProvider, LocalSpecProvider
 from megatron.core.models.gpt.linear_attention_module_specs import (
     get_linear_attention_module_spec_for_backend,
 )
+from megatron.core.transformer.hyper_connection import HyperConnectionModule
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec_for_backend
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType, LayerType
@@ -260,9 +261,11 @@ def get_transformer_layer_spec_for_backend(
             input_layernorm=input_layernorm,
             self_attention=attention,
             self_attn_bda=get_bias_dropout_add,
+            self_attention_hyper_connection=HyperConnectionModule,
             pre_mlp_layernorm=pre_mlp_layernorm,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
+            mlp_hyper_connection=HyperConnectionModule,
             sharded_state_dict_keys_map=sharded_state_dict_keys_map,
         ),
     )
@@ -687,6 +690,12 @@ def get_gpt_mtp_block_spec_for_backend(
     else:
         raise ValueError(f"Invalid spec: {spec}")
 
+    # TODO: support hyper connections for mtp. 
+    # Remove all hyper connections in transformer_layer_spec
+    transformer_layer_spec.submodules.self_attention_hyper_connection = IdentityOp
+    transformer_layer_spec.submodules.cross_attention_hyper_connection = IdentityOp
+    transformer_layer_spec.submodules.mlp_hyper_connection = IdentityOp
+
     mtp_layer_spec = get_mtp_layer_spec_for_backend(
         transformer_layer_spec=transformer_layer_spec, backend=backend
     )
@@ -697,6 +706,9 @@ def get_gpt_mtp_block_spec_for_backend(
     # split the mtp layer specs to only include the layers that are built in this pipeline stage.
     mtp_layer_specs = mtp_layer_specs[offset : offset + num_layers_to_build]
     if len(mtp_layer_specs) > 0:
+        assert (
+            len(mtp_layer_specs) == config.mtp_num_layers
+        ), f"currently all of the mtp layers must stage in the same pipeline stage."
         mtp_block_spec = MultiTokenPredictionBlockSubmodules(layer_specs=mtp_layer_specs)
     else:
         mtp_block_spec = None

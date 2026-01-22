@@ -195,6 +195,15 @@ class TransformerConfig(ModelParallelConfig):
     attention_output_gate: bool = False
     """Whether to apply output gate to the attention layers."""
 
+    attention_output_gate_target: str = "value"
+    """Target for the output gate application. Valid options are:
+    - "value": Apply gate to value before attention (default, current implementation)
+    - "output": Apply gate to attention output after core attention (Qwen-style)"""
+
+    attention_gate_conv_kernel_size: Optional[int] = None
+    """Kernel size for depthwise conv1d on attention gate to add positional information.
+    Set to None or 0 to disable conv1d on gate."""
+
     test_mode: bool = False
     """Whether to run real-time tests."""
 
@@ -697,6 +706,49 @@ class TransformerConfig(ModelParallelConfig):
     When cuda_graph_impl is set to "local", "full_iteration" can be specified as cuda_graph_scope
     to enable whole iteration CUDA graph. All other values enable layerwise CUDA graph."""
 
+####################
+    # Hyper-Connection Configuration
+    ####################
+    enable_hyper_connections: bool = False
+    """Enable mHC residual connections."""
+
+    num_residual_streams: int = 4
+    """Number of residual streams (n in paper)."""
+
+    mhc_sinkhorn_iterations: int = 20
+    """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
+
+    mhc_init_gating_factor: float = 0.01
+    """Initial value of Gating Factor (alpha in paper)."""
+
+    recompute_hyper_connections: bool = False
+    """Enable recomputation for HyperConnection intermediate activations.
+    
+    When enabled, all HyperConnection operations (compute_mappings, aggregate, apply_h_res, 
+    apply_h_post) are wrapped with CheckpointWithoutOutput and managed by MHCBlockRecomputeManager.
+    This significantly reduces memory usage by discarding intermediate activations and 
+    recomputing them during backward pass.
+    
+    Requirements:
+    - Only effective when enable_hyper_connections=True and training=True
+    - Must use recompute_granularity='selective'
+    - Cannot be used together with recompute_mlp=True (they use different checkpoint mechanisms)
+    
+    The last layer in each recompute block's final MLP BDA output is NOT checkpointed and 
+    serves as the hook_tensor for registering the unified recompute hook."""
+
+    mhc_recompute_layer_num: Optional[int] = None
+    """Number of layers per MHC recompute block.
+    
+    When set, every `mhc_recompute_layer_num` layers form a recompute block. The last layer
+    in each recompute block (i.e., layer_number % mhc_recompute_layer_num == 0 or the final
+    layer in the transformer block) will:
+    - NOT checkpoint its final MLP BDA
+    - Register the unified recompute hook on its MLP BDA output
+    - A new MHCBlockRecomputeManager is created for subsequent layers
+    
+    If None, all layers in the transformer block share a single recompute block."""
+
     ####################
     # miscellaneous
     ####################
@@ -1138,6 +1190,36 @@ class TransformerConfig(ModelParallelConfig):
             self.recompute_granularity = "selective"
             if "moe" not in self.recompute_modules:
                 self.recompute_modules.append("moe")
+# Validation for recompute_hyper_connections
+        if self.recompute_hyper_connections:
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "recompute_hyper_connections requires enable_hyper_connections=True."
+                )
+            if self.recompute_granularity != "selective":
+                raise ValueError(
+                    "recompute_hyper_connections requires recompute_granularity='selective'. "
+                    f"Got recompute_granularity={self.recompute_granularity}."
+                )
+            if "mlp" in self.recompute_modules:
+                raise ValueError(
+                    "recompute_hyper_connections cannot be used together with 'mlp' in "
+                    "recompute_modules. They use different checkpoint mechanisms that may conflict."
+                )
+
+        # Validation for hyper_connections with tensor parallelism
+        # When hyper connections are enabled with TP > 1, sequence_parallel must be True.
+        # This is because HyperConnectionModule uses non-TP-aware layers (nn.Linear, nn.RMSNorm),
+        # and their gradients need to be synchronized across TP ranks via the sequence_parallel
+        # attribute mechanism.
+        if self.enable_hyper_connections and self.tensor_model_parallel_size > 1:
+            if not self.sequence_parallel:
+                raise ValueError(
+                    "When enable_hyper_connections=True and tensor_model_parallel_size > 1, "
+                    "sequence_parallel must be True. HyperConnectionModule parameters require "
+                    "gradient synchronization across TP ranks, which is handled by the "
+                    "sequence_parallel mechanism."
+                )
 
         if self.fine_grained_activation_offloading:
             assert (
@@ -1421,6 +1503,14 @@ class TransformerConfig(ModelParallelConfig):
         if self.fused_single_qkv_rope:
             if self.attention_output_gate:
                 raise ValueError("fused_single_qkv_rope does not support gated attention for now.")
+
+        if self.attention_output_gate:
+            valid_gate_targets = ["value", "output"]
+            if self.attention_output_gate_target not in valid_gate_targets:
+                raise ValueError(
+                    f"attention_output_gate_target must be one of {valid_gate_targets}, "
+                    f"got {self.attention_output_gate_target}"
+                )
 
         if self.multi_latent_attention and self.rotary_interleaved:
             raise ValueError("rotary_interleaved does not work with multi_latent_attention.")
