@@ -48,6 +48,8 @@ For NVIDIA GPU Cloud (NGC) container setup and all installation options, review 
 - **[Contribution Guide](https://docs.nvidia.com/megatron-core/developer-guide/latest/developer/contribute.html)** - How to contribute to Megatron Core
 - **[Style Guide](style-guide.md)** - Python style overrides
 
+THD (packed sequences) support for [cross-layer tensor state](docs/user-guide/features/cross_layer_state.md) is still a work in progress and is not supported by this feature's main-branch implementation.
+
 # Latest News
 
 - **[2026/10]** **[Scale Bitwise-Deterministic Pretraining with NVIDIA Megatron Core](https://developer.nvidia.com/blog/scale-bitwise-deterministic-pretraining-with-nvidia-megatron-core/)** - A guide to reproducing training runs, validating checkpoint resume, and reducing determinism overhead at scale with Megatron Core.
