@@ -18,6 +18,7 @@ from megatron.core.utils import make_viewless_tensor, nvtx_range_pop, nvtx_range
 
 if TYPE_CHECKING:
     from megatron.core.tensor_parallel.random import CheckpointWithoutOutputManager
+    from megatron.core.transformer.hyper_connection import SinglePassMHCState
 
 
 class HyperConnectionTransformerLayer(TransformerLayer):
@@ -165,7 +166,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             submodules.append(self.mlp_hyper_connection)
         return submodules
 
-    def _run_input_layernorm(self, hidden_states):
+    def _run_input_layernorm(self, hidden_states, mhc_state: SinglePassMHCState | None = None):
         """HC input layernorm: hyper-connection pre-wrap + mHC-aware checkpoint.
 
         Threads ``h_res`` and ``h_post`` (produced by the hyper-connection
@@ -187,7 +188,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         nvtx_range_push(suffix="self_attention_hyper_connection")
         hidden_states, h_res, h_post = self.self_attention_hyper_connection(
-            hidden_states, mhc_recompute_manager=self._mhc_recompute_manager
+            hidden_states,
+            mhc_recompute_manager=self._mhc_recompute_manager,
+            **({"mhc_state": mhc_state} if mhc_state is not None else {}),
         )
         nvtx_range_pop(suffix="self_attention_hyper_connection")
 
@@ -269,7 +272,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         self.attn_norm_manager = None
         return hidden_states
 
-    def _pre_mlp_layernorm_and_residual(self, hidden_states):
+    def _pre_mlp_layernorm_and_residual(
+        self, hidden_states, mhc_state: SinglePassMHCState | None = None
+    ):
         """HC pre-mlp layernorm: hyper-connection pre-wrap + mHC-aware checkpoint.
 
         Threads ``mlp_h_res`` and ``mlp_hc_h_post`` (produced by the
@@ -289,7 +294,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         nvtx_range_push(suffix="mlp_hyper_connection")
         hidden_states, mlp_h_res, mlp_hc_h_post = self.mlp_hyper_connection(
-            hidden_states, mhc_recompute_manager=self._mhc_recompute_manager
+            hidden_states,
+            mhc_recompute_manager=self._mhc_recompute_manager,
+            **({"mhc_state": mhc_state} if mhc_state is not None else {}),
         )
         nvtx_range_pop(suffix="mlp_hyper_connection")
 

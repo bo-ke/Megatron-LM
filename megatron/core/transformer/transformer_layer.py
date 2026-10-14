@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol, Union
 
 if TYPE_CHECKING:
     from megatron.core.tensor_parallel.random import CheckpointWithoutOutputManager
+    from megatron.core.transformer.hyper_connection import SinglePassMHCState
 
 import torch
 import torch.distributed
@@ -229,6 +230,18 @@ def get_transformer_layer_offset(
     else:
         offset = 0
     return offset
+
+
+class CrossLayerState(Protocol):
+    """Forward-local state shared by participating attention layers.
+
+    The stack transports this state; the attention implementation owns its
+    contents. Every microbatch must receive a fresh instance.
+    """
+
+    def attention_kwargs(self, layer_number: int) -> dict[str, Any]:
+        """Return the arguments understood by this state's attention implementation."""
+        ...
 
 
 class MlpInterface(Protocol):
@@ -685,6 +698,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
         mhc_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None,
         *,
         inference_params: Optional[Any] = None,
+        cross_layer_state: CrossLayerState | None = None,
     ):
         """Run input norm and self-attention, returning the raw output before BDA."""
         inference_context = deprecate_inference_params(inference_context, inference_params)
@@ -716,6 +730,11 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
+            **(
+                cross_layer_state.attention_kwargs(self.layer_number)
+                if cross_layer_state is not None
+                else {}
+            ),
         )
         nvtx_range_pop(suffix="self_attention")
 
@@ -790,6 +809,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
         residual_stream_recompute_context: ResidualStreamRecomputeContext | None = None,
         *,
         inference_params: Optional[Any] = None,
+        cross_layer_state: CrossLayerState | None = None,
+        mhc_state: SinglePassMHCState | None = None,
     ):
         """
         Perform a forward pass through the attention layer and the layernorms before and after
@@ -828,12 +849,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
             # Whole-layer batch-first mask shape, taken before MLP chunking splits the mask, so TE
             # CUDA graph capture reserves (and replay passes) a mask of the layer's input shape.
             self._padding_mask_shape_seen = tuple(padding_mask.shape)
-        if residual_stream_recompute_context is None:
-            input_layernorm_output, residual, attn_state = self._run_input_layernorm(hidden_states)
-        else:
-            input_layernorm_output, residual, attn_state = self._run_input_layernorm(
-                hidden_states, residual_stream_recompute_context=residual_stream_recompute_context
-            )
+        norm_kwargs = {}
+        if residual_stream_recompute_context is not None:
+            norm_kwargs["residual_stream_recompute_context"] = residual_stream_recompute_context
+        if mhc_state is not None:
+            norm_kwargs["mhc_state"] = mhc_state
+        input_layernorm_output, residual, attn_state = self._run_input_layernorm(
+            hidden_states, **norm_kwargs
+        )
 
         using_fused_tp_inference_kernel = (
             InferenceMode.is_active() and self.config.inference_fuse_tp_communication
@@ -856,6 +879,11 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 sequence_len_offset=sequence_len_offset,
+                **(
+                    cross_layer_state.attention_kwargs(self.layer_number)
+                    if cross_layer_state is not None
+                    else {}
+                ),
             )
         nvtx_range_pop(suffix="self_attention")
 
@@ -1154,6 +1182,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
                     )
                 if kwargs.get("input_ids", None) is not None:
                     mlp_kwargs["input_ids"] = kwargs["input_ids"]
+                if kwargs.get("mhc_state") is not None:
+                    mlp_kwargs["mhc_state"] = kwargs["mhc_state"]
                 output = self._forward_mlp(
                     hidden_states, kwargs.get("inference_context", None), **mlp_kwargs
                 )
@@ -1357,6 +1387,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
         packed_seq_params=None,
         input_ids: Optional[Tensor] = None,
         residual_stream_recompute_context: ResidualStreamRecomputeContext | None = None,
+        mhc_state: SinglePassMHCState | None = None,
     ) -> Tensor | list[Tensor | None]:
         """
         Perform a forward pass through the feed-forward layer.
@@ -1378,14 +1409,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
         Returns:
             output (Tensor): Transformed hidden states of shape [s, b, h].
         """
-        if residual_stream_recompute_context is None:
-            pre_mlp_layernorm_output, residual, mlp_state = self._pre_mlp_layernorm_and_residual(
-                hidden_states
-            )
-        else:
-            pre_mlp_layernorm_output, residual, mlp_state = self._pre_mlp_layernorm_and_residual(
-                hidden_states, residual_stream_recompute_context=residual_stream_recompute_context
-            )
+        norm_kwargs = {}
+        if residual_stream_recompute_context is not None:
+            norm_kwargs["residual_stream_recompute_context"] = residual_stream_recompute_context
+        if mhc_state is not None:
+            norm_kwargs["mhc_state"] = mhc_state
+        pre_mlp_layernorm_output, residual, mlp_state = self._pre_mlp_layernorm_and_residual(
+            hidden_states, **norm_kwargs
+        )
 
         pre_mlp_layernorm_output, padding_mask, input_ids, moe_unflatten_mbs = (
             self._maybe_unflatten_for_moe(
