@@ -1042,6 +1042,14 @@ KERNELS: Tuple[KernelEntry, ...] = (
         notes="DSA weights projection dispatches Transformer Engine general_gemm when available; "
         "replay covers the selected GEMM, deterministic torch fallback, and chunked KPool top-k.",
     ),
+    KernelEntry(
+        name="v41_engram_embedding",
+        sources=("megatron/core/models/engram/distributed_embedding.py",),
+        tests=("tests/unit_tests/models/test_v41_engram.py",),
+        kind="torch-op",
+        notes="Sorted repeated-row accumulation in deterministic mode; real Gloo EP lookup "
+        "and gradient parity, including uneven shards. NCCL GPU replay remains to be qualified.",
+    ),
     # ---------------------------------------------------------------- DeepSeek sparse attention (TileLang)
     KernelEntry(
         name="dsa_tilelang_absorbed_shape_dispatch",
