@@ -622,6 +622,8 @@ def get_batch_on_this_rank_for_sequence_packing(
     vp_stage: Optional[int] = None,
     dynamic_cp: bool = False,
     pg_collection: Optional[ProcessGroupCollection] = None,
+    cp_layout: str = "zigzag",
+    use_logical_qkv_seqlens: bool = False,
     config=None,
     return_context_parallel_batch: bool = False,
     dynamic_cp_group_func: Optional[Callable[..., torch.distributed.ProcessGroup]] = None,
@@ -634,6 +636,9 @@ def get_batch_on_this_rank_for_sequence_packing(
         data_iterator (Iterator): The data iterator to get the batch from.
         mtp_on_this_rank (bool): Whether to use multi-token prediction.
         vp_stage (Optional[int]): The stage of the pipeline.
+        cp_layout (str): Contiguous or per-sequence zigzag query partitioning.
+        use_logical_qkv_seqlens (bool): Preserve real lengths for consumers that
+            use the separate padded prefixes, instead of the legacy TE workaround.
         return_context_parallel_batch (bool): Return layout-keyed batch views
             instead of the legacy GPT tuple.
         dynamic_cp_group_func (Callable, optional): Overrides the collection's runtime CP
@@ -649,6 +654,8 @@ def get_batch_on_this_rank_for_sequence_packing(
         packed_seq_params, padding_mask)
     """
 
+    if cp_layout not in ("contiguous", "zigzag"):
+        raise ValueError(f"Unsupported packed CP layout: {cp_layout}")
     if pg_collection is None:
         raise ValueError("pg_collection is required for sequence packing")
     if dynamic_cp and config is None:
@@ -731,17 +738,27 @@ def get_batch_on_this_rank_for_sequence_packing(
             # TODO: Revert this workaround once TE fixes the issue.
             cu_seqlens = batch["cu_seqlens_padded"]
             total_tokens = int(cu_seqlens[-1].item())
-            assert (
-                tex is not None
-            ), "Transformer Engine is required to use Context Parallel with THD format data."
-            index = tex.thd_get_partitioned_indices(cu_seqlens, total_tokens, cp_size, cp_rank)
+            if cp_layout == "contiguous":
+                if total_tokens % cp_size:
+                    raise ValueError("Packed token capacity must be divisible by CP size")
+                local_tokens = total_tokens // cp_size
+                index = slice(cp_rank * local_tokens, (cp_rank + 1) * local_tokens)
+            else:
+                assert (
+                    tex is not None
+                ), "Transformer Engine is required to use Context Parallel with THD format data."
+                index = tex.thd_get_partitioned_indices(cu_seqlens, total_tokens, cp_size, cp_rank)
             cp_slice_keys = ['padding_mask']
             if is_first_stage or mtp_on_this_rank:
                 cp_slice_keys.extend(['tokens', 'position_ids'])
             if is_last_stage or mtp_on_this_rank:
                 cp_slice_keys.extend(['labels', 'loss_mask'])
             for key in cp_slice_keys:
-                batch[key] = batch[key].index_select(0, index)
+                batch[key] = (
+                    batch[key][index]
+                    if cp_layout == "contiguous"
+                    else batch[key].index_select(0, index)
+                )
 
     # Broadcast the receive-buffer shapes inside the TP group:
     # - cu_seqlen_size is needed to allocate cu_seqlens / cu_seqlens_padded on non TP 0 ranks.
@@ -908,7 +925,11 @@ def get_batch_on_this_rank_for_sequence_packing(
         local_cp_size=local_cp_size,
         cp_group=runtime_cp_group,
         tp_cp_group=runtime_tp_cp_group,
-        total_tokens=int(cu_seqlens_padded[-1].item()),
+        total_tokens=(
+            total_tokens * cp_group.size()
+            if use_logical_qkv_seqlens
+            else int(cu_seqlens_padded[-1].item())
+        ),
         pad_between_seqs=not torch.equal(cu_seqlens, cu_seqlens_padded),
     )
 

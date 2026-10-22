@@ -118,6 +118,7 @@ def get_batch(data_iterator, vp_stage=None, pg_collection: Optional[ProcessGroup
     config = _get_transformer_config(args)
 
     if args.sequence_packing_scheduler is not None:
+        v41 = getattr(args, 'dsv4_version', 'v4') == 'v4.1'
         if pg_collection is None:
             # Compatibility for direct entrypoint callers; Core receives explicit groups.
             pg_collection = ProcessGroupCollection.use_mpu_process_groups(
@@ -135,6 +136,8 @@ def get_batch(data_iterator, vp_stage=None, pg_collection: Optional[ProcessGroup
                 vp_size=config.virtual_pipeline_model_parallel_size or 1,
             ),
             vp_stage=vp_stage,
+            cp_layout=config.linear_cp_layout if v41 else 'zigzag',
+            use_logical_qkv_seqlens=v41,
             dynamic_cp=args.dynamic_context_parallel,
             pg_collection=pg_collection,
             config=config,
@@ -362,7 +365,8 @@ def forward_step(data_iterator, model: HybridModel):
         tokens = batch.get("tokens")
         packed_seq_params = cp_batch.get_packed_seq_params()
         padding_mask = batch.get("padding_mask")
-        if cu_seqlens is not None:
+        # The packing scheduler already supplies global real-token FLOPs statistics.
+        if cu_seqlens is not None and get_args().sequence_packing_scheduler is None:
             update_seqlen_stats_from_cu_seqlens(cu_seqlens.squeeze(0))
 
         # Offline logits KD: record this microbatch's global (un-CP-sharded)
