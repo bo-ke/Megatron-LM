@@ -105,13 +105,6 @@ R = "tests/unit_tests/context_parallel/runtime/"
 
 KERNELS: Tuple[KernelEntry, ...] = (
     KernelEntry(
-        name="csa_output_rope_reconstruction",
-        sources=("megatron/core/ops/attention/csa/output_rope.py",),
-        tests=(K + "test_csa_output_rope.py",),
-        kind="triton",
-        notes="Alias-safe output/gradient reconstruction, SBHD B>1 and THD/CP positions.",
-    ),
-    KernelEntry(
         name="cross_layer_tensor_state",
         sources=(
             "megatron/core/transformer/state_boundary.py",
@@ -121,6 +114,13 @@ KERNELS: Tuple[KernelEntry, ...] = (
         tests=(K + "test_shared_tensor_state.py",),
         kind="dispatch",
         notes="Eager/checkpoint/Torch and TE graph state replay, plus explicit CP layout/gather gradients.",
+    ),
+    KernelEntry(
+        name="csa_output_rope_reconstruction",
+        sources=("megatron/core/ops/attention/csa/output_rope.py",),
+        tests=(K + "test_csa_output_rope.py",),
+        kind="triton",
+        notes="Alias-safe output/gradient reconstruction, SBHD B>1 and THD/CP positions.",
     ),
     # ---------------------------------------------------------------- fused elementwise (jit_fuser / torch.compile)
     KernelEntry(
@@ -995,6 +995,7 @@ KERNELS: Tuple[KernelEntry, ...] = (
     KernelEntry(
         name="csa2_shared_attention",
         sources=(
+            "megatron/core/ops/attention/csa/indexer_quantization.py",
             "megatron/core/transformer/experimental_attention_variant/csa2.py",
             "megatron/core/transformer/experimental_attention_variant/csa_utils/csa2_candidates.py",
             "megatron/core/transformer/experimental_attention_variant/csa_utils/csa2_indexer.py",
@@ -1036,20 +1037,20 @@ KERNELS: Tuple[KernelEntry, ...] = (
         "numerical CP parity is covered by test_dsv4_packed_cp.py.",
     ),
     KernelEntry(
-        name="dsa_dispatch",
-        sources=("megatron/core/transformer/experimental_attention_variant/dsa.py",),
-        tests=(K + "test_fused_triton_kernels.py", R + 'test_indexer_replay.py'),
-        kind="dispatch",
-        notes="DSA weights projection dispatches Transformer Engine general_gemm when available; "
-        "replay covers the selected GEMM, deterministic torch fallback, and chunked KPool top-k.",
-    ),
-    KernelEntry(
         name="v41_engram_embedding",
         sources=("megatron/core/models/engram/distributed_embedding.py",),
         tests=("tests/unit_tests/models/test_v41_engram.py",),
         kind="torch-op",
         notes="Sorted repeated-row accumulation in deterministic mode; real Gloo EP lookup "
         "and gradient parity, including uneven shards. NCCL GPU replay remains to be qualified.",
+    ),
+    KernelEntry(
+        name="dsa_dispatch",
+        sources=("megatron/core/transformer/experimental_attention_variant/dsa.py",),
+        tests=(K + "test_fused_triton_kernels.py", R + 'test_indexer_replay.py'),
+        kind="dispatch",
+        notes="DSA weights projection dispatches Transformer Engine general_gemm when available; "
+        "replay covers the selected GEMM, deterministic torch fallback, and chunked KPool top-k.",
     ),
     # ---------------------------------------------------------------- DeepSeek sparse attention (TileLang)
     KernelEntry(
