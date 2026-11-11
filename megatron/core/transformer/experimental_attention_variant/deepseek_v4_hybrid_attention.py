@@ -335,8 +335,13 @@ class DSv4HybridAttention(Attention):
         key = key.contiguous()
         value = value.contiguous()
 
+        # CSA2 (v4.1) takes no out_rope: its inverse RoPE stays outside the kernel.
         out_rope = None
-        if self.config.apply_rope_fusion and self.core_attention.use_fused_kernels:
+        if (
+            self.config.dsv4_version != "v4.1"
+            and self.config.apply_rope_fusion
+            and self.core_attention.use_fused_kernels
+        ):
             cu_seqlens = None
             rope_seqlen = hidden_states.shape[0]
             if packed_seq:
@@ -384,8 +389,11 @@ class DSv4HybridAttention(Attention):
                 qr=q_compressed,
                 boundary_hidden=boundary_hidden,
                 boundary_kv=boundary_kv,
-                out_rope=out_rope,
-                **({"csa2_state": csa2_state} if self.config.dsv4_version == "v4.1" else {}),
+                **(
+                    {"csa2_state": csa2_state}
+                    if self.config.dsv4_version == "v4.1"
+                    else {"out_rope": out_rope}
+                ),
             )
         forced_released_tensors = [query, key, value]
         if boundary_kv is not None:
